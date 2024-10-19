@@ -11,7 +11,7 @@ use alvr_common::{glam::Vec3, *};
 use alvr_packets::{ButtonEntry, ButtonValue, ViewParams};
 use alvr_session::{BodyTrackingSourcesConfig, FaceTrackingSourcesConfig};
 use openxr as xr;
-use std::{collections::HashMap, time::Duration};
+use std::collections::HashMap;
 use xr::SpaceLocationFlags;
 
 const IPD_CHANGE_EPS: f32 = 0.001;
@@ -414,13 +414,13 @@ pub fn get_reference_space(
 pub fn get_head_data(
     xr_session: &xr::Session<xr::OpenGlEs>,
     reference_space: &xr::Space,
-    target_timestamp: Duration,
+    time: xr::Time,
     last_ipd_m: &mut f32,
 ) -> Option<(DeviceMotion, Option<[ViewParams; 2]>)> {
     let (head_location, head_velocity) = xr_session
         .create_reference_space(xr::ReferenceSpaceType::VIEW, xr::Posef::IDENTITY)
         .ok()?
-        .relate(&reference_space, crate::to_xr_time(target_timestamp))
+        .relate(&reference_space, time)
         .ok()?;
 
     if !head_location
@@ -433,7 +433,7 @@ pub fn get_head_data(
     let (view_flags, views) = xr_session
         .locate_views(
             xr::ViewConfigurationType::PRIMARY_STEREO,
-            crate::to_xr_time(target_timestamp),
+            time,
             &reference_space,
         )
         .ok()?;

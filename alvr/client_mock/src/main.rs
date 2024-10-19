@@ -171,7 +171,7 @@ fn tracking_thread(
         let position = Vec3::new(0.0, input_lock.height, 0.0);
 
         context.send_tracking(
-            Instant::now() - timestamp_origin + context.get_head_prediction_offset(),
+            Instant::now() - timestamp_origin,
             vec![(
                 *HEAD_ID,
                 DeviceMotion {
@@ -210,6 +210,10 @@ fn client_thread(
         encoder_high_profile: false,
         encoder_10_bits: false,
         encoder_av1: false,
+        prefer_10bit: false,
+        prefer_full_range: true,
+        preferred_encoding_gamma: 1.0,
+        prefer_hdr: false,
     };
     let client_core_context = Arc::new(ClientCoreContext::new(capabilities));
 

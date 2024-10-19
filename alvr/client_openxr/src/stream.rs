@@ -17,7 +17,7 @@ use alvr_common::{
 use alvr_packets::{FaceData, StreamConfig, ViewParams};
 use alvr_session::{
     BodyTrackingSourcesConfig, ClientsideFoveationConfig, ClientsideFoveationMode, CodecType,
-    EncoderConfig, FaceTrackingSourcesConfig, FoveatedEncodingConfig, MediacodecDataType,
+    FaceTrackingSourcesConfig, FoveatedEncodingConfig, MediacodecDataType,
 };
 use openxr as xr;
 use std::{
@@ -28,17 +28,16 @@ use std::{
     time::{Duration, Instant},
 };
 
-// When the latency goes too high, if prediction offset is not capped tracking poll will fail.
-const MAX_PREDICTION: Duration = Duration::from_millis(70);
 const DECODER_MAX_TIMEOUT_MULTIPLIER: f32 = 0.8;
 
 #[derive(PartialEq, Clone)]
 pub struct ParsedStreamConfig {
     pub view_resolution: UVec2,
     pub refresh_rate_hint: f32,
+    pub encoding_gamma: f32,
+    pub enable_hdr: bool,
     pub foveated_encoding_config: Option<FoveatedEncodingConfig>,
     pub clientside_foveation_config: Option<ClientsideFoveationConfig>,
-    pub encoder_config: EncoderConfig,
     pub face_sources_config: Option<FaceTrackingSourcesConfig>,
     pub body_sources_config: Option<BodyTrackingSourcesConfig>,
     pub prefers_multimodal_input: bool,
@@ -53,6 +52,8 @@ impl ParsedStreamConfig {
         ParsedStreamConfig {
             view_resolution: config.negotiated_config.view_resolution,
             refresh_rate_hint: config.negotiated_config.refresh_rate_hint,
+            encoding_gamma: config.negotiated_config.encoding_gamma,
+            enable_hdr: config.negotiated_config.enable_hdr,
             foveated_encoding_config: config
                 .negotiated_config
                 .enable_foveated_encoding
@@ -64,7 +65,6 @@ impl ParsedStreamConfig {
                 .clientside_foveation
                 .as_option()
                 .cloned(),
-            encoder_config: config.settings.video.encoder_config.clone(),
             face_sources_config: config
                 .settings
                 .headset
@@ -155,8 +155,7 @@ impl StreamContext {
             None
         };
 
-        let format =
-            graphics::swapchain_format(&gfx_ctx, &xr_ctx.session, config.encoder_config.enable_hdr);
+        let format = graphics::swapchain_format(&gfx_ctx, &xr_ctx.session, config.enable_hdr);
 
         let swapchains = [
             graphics::create_swapchain(
@@ -194,10 +193,9 @@ impl StreamContext {
             ],
             format,
             config.foveated_encoding_config.clone(),
-            platform != Platform::Lynx
-                && !((platform.is_pico()) && config.encoder_config.enable_hdr),
-            !config.encoder_config.enable_hdr,
-            config.encoder_config.encoding_gamma,
+            platform != Platform::Lynx && !((platform.is_pico()) && config.enable_hdr),
+            !config.enable_hdr,
+            config.encoding_gamma,
         );
 
         core_ctx.send_playspace(
@@ -353,6 +351,12 @@ impl StreamContext {
             if let Some((timestamp, buffer_ptr)) = frame_result {
                 let view_params = self.core_context.report_compositor_start(timestamp);
 
+                // Avoid passing invalid timestamp to runtime
+                let timestamp =
+                    Duration::max(timestamp, vsync_time.saturating_sub(Duration::from_secs(1)));
+
+                self.last_good_view_params = view_params;
+
                 (timestamp, view_params, buffer_ptr)
             } else {
                 (vsync_time, self.last_good_view_params, ptr::null_mut())
@@ -377,9 +381,11 @@ impl StreamContext {
         self.swapchains[1].release_image().unwrap();
 
         if !buffer_ptr.is_null() {
-            if let Some(now) = crate::xr_runtime_now(&self.xr_context.instance) {
-                self.core_context
-                    .report_submit(timestamp, vsync_time.saturating_sub(now));
+            if let Some(xr_now) = crate::xr_runtime_now(&self.xr_context.instance) {
+                self.core_context.report_submit(
+                    timestamp,
+                    vsync_time.saturating_sub(Duration::from_nanos(xr_now.as_nanos() as u64)),
+                );
             }
         }
 
@@ -451,22 +457,16 @@ fn stream_input_loop(
             return;
         }
 
-        let Some(now) = crate::xr_runtime_now(&xr_ctx.instance) else {
+        let Some(xr_now) = crate::xr_runtime_now(&xr_ctx.instance) else {
             error!("Cannot poll tracking: invalid time");
             return;
         };
 
-        let target_timestamp =
-            now + Duration::min(core_ctx.get_head_prediction_offset(), MAX_PREDICTION);
-
         let mut device_motions = Vec::with_capacity(3);
 
-        let Some((head_motion, local_views)) = interaction::get_head_data(
-            &xr_ctx.session,
-            &reference_space,
-            target_timestamp,
-            &mut last_ipd,
-        ) else {
+        let Some((head_motion, local_views)) =
+            interaction::get_head_data(&xr_ctx.session, &reference_space, xr_now, &mut last_ipd)
+        else {
             continue;
         };
 
@@ -476,14 +476,10 @@ fn stream_input_loop(
             core_ctx.send_view_params(views);
         }
 
-        let tracker_time = crate::to_xr_time(
-            now + Duration::min(core_ctx.get_tracker_prediction_offset(), MAX_PREDICTION),
-        );
-
         let (left_hand_motion, left_hand_skeleton) = crate::interaction::get_hand_data(
             &xr_ctx.session,
             &reference_space,
-            tracker_time,
+            xr_now,
             &interaction_ctx.hands_interaction[0],
             &mut last_controller_poses[0],
             &mut last_palm_poses[0],
@@ -491,7 +487,7 @@ fn stream_input_loop(
         let (right_hand_motion, right_hand_skeleton) = crate::interaction::get_hand_data(
             &xr_ctx.session,
             &reference_space,
-            tracker_time,
+            xr_now,
             &interaction_ctx.hands_interaction[1],
             &mut last_controller_poses[1],
             &mut last_palm_poses[1],
@@ -515,11 +511,11 @@ fn stream_input_loop(
                 &xr_ctx.session,
                 &interaction_ctx.face_sources,
                 &reference_space,
-                crate::to_xr_time(now),
+                xr_now,
             ),
             fb_face_expression: interaction::get_fb_face_expression(
                 &interaction_ctx.face_sources,
-                crate::to_xr_time(now),
+                xr_now,
             ),
             htc_eye_expression: interaction::get_htc_eye_expression(&interaction_ctx.face_sources),
             htc_lip_expression: interaction::get_htc_lip_expression(&interaction_ctx.face_sources),
@@ -528,14 +524,14 @@ fn stream_input_loop(
         if let Some((tracker, joint_count)) = &interaction_ctx.body_sources.body_tracker_fb {
             device_motions.append(&mut interaction::get_fb_body_tracking_points(
                 &reference_space,
-                crate::to_xr_time(now),
+                xr_now,
                 tracker,
                 *joint_count,
             ));
         }
 
         core_ctx.send_tracking(
-            target_timestamp,
+            Duration::from_nanos(xr_now.as_nanos() as u64),
             device_motions,
             [left_hand_skeleton, right_hand_skeleton],
             face_data,

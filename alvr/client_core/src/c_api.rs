@@ -41,6 +41,10 @@ pub struct AlvrClientCapabilities {
     encoder_high_profile: bool,
     encoder_10_bits: bool,
     encoder_av1: bool,
+    prefer_10bit: bool,
+    prefer_full_range: bool,
+    preferred_encoding_gamma: f32,
+    prefer_hdr: bool,
 }
 
 #[repr(u8)]
@@ -57,7 +61,9 @@ pub enum AlvrEvent {
         view_width: u32,
         view_height: u32,
         refresh_rate_hint: f32,
+        encoding_gamma: f32,
         enable_foveated_encoding: bool,
+        enable_hdr: bool,
     },
     StreamingStopped,
     Haptics {
@@ -182,6 +188,11 @@ pub enum AlvrLogLevel {
 }
 
 #[no_mangle]
+pub extern "C" fn alvr_initialize_logging() {
+    crate::init_logging();
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn alvr_path_string_to_id(path: *const c_char) -> u64 {
     alvr_common::hash_string(CStr::from_ptr(path).to_str().unwrap())
 }
@@ -278,6 +289,10 @@ pub unsafe extern "C" fn alvr_initialize(capabilities: AlvrClientCapabilities) {
         encoder_high_profile: capabilities.encoder_high_profile,
         encoder_10_bits: capabilities.encoder_10_bits,
         encoder_av1: capabilities.encoder_av1,
+        prefer_10bit: capabilities.prefer_10bit,
+        prefer_full_range: capabilities.prefer_full_range,
+        preferred_encoding_gamma: capabilities.preferred_encoding_gamma,
+        prefer_hdr: capabilities.prefer_hdr,
     };
     *CLIENT_CORE_CONTEXT.lock() = Some(ClientCoreContext::new(capabilities));
 }
@@ -323,9 +338,11 @@ pub extern "C" fn alvr_poll_event(out_event: *mut AlvrEvent) -> bool {
                         view_width: stream_config.negotiated_config.view_resolution.x,
                         view_height: stream_config.negotiated_config.view_resolution.y,
                         refresh_rate_hint: stream_config.negotiated_config.refresh_rate_hint,
+                        encoding_gamma: stream_config.negotiated_config.encoding_gamma,
                         enable_foveated_encoding: stream_config
                             .negotiated_config
                             .enable_foveated_encoding,
+                        enable_hdr: stream_config.negotiated_config.enable_hdr,
                     }
                 }
                 ClientCoreEvent::StreamingStopped => AlvrEvent::StreamingStopped,
@@ -482,7 +499,7 @@ pub extern "C" fn alvr_send_view_params(view_params: *const AlvrViewParams) {
 /// * inner ptr: pose (can be null if eye gaze is absent)
 #[no_mangle]
 pub extern "C" fn alvr_send_tracking(
-    target_timestamp_ns: u64,
+    poll_timestamp_ns: u64,
     device_motions: *const AlvrDeviceMotion,
     device_motions_count: u64,
     hand_skeletons: *const *const AlvrPose,
@@ -564,7 +581,7 @@ pub extern "C" fn alvr_send_tracking(
 
     if let Some(context) = &*CLIENT_CORE_CONTEXT.lock() {
         context.send_tracking(
-            Duration::from_nanos(target_timestamp_ns),
+            Duration::from_nanos(poll_timestamp_ns),
             device_motions,
             hand_skeletons,
             FaceData {
@@ -572,24 +589,6 @@ pub extern "C" fn alvr_send_tracking(
                 ..Default::default()
             },
         );
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn alvr_get_head_prediction_offset_ns() -> u64 {
-    if let Some(context) = &*CLIENT_CORE_CONTEXT.lock() {
-        context.get_head_prediction_offset().as_nanos() as u64
-    } else {
-        0
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn alvr_get_tracker_prediction_offset_ns() -> u64 {
-    if let Some(context) = &*CLIENT_CORE_CONTEXT.lock() {
-        context.get_tracker_prediction_offset().as_nanos() as u64
-    } else {
-        0
     }
 }
 
@@ -623,7 +622,7 @@ pub extern "C" fn alvr_set_decoder_input_callback(
 #[no_mangle]
 pub extern "C" fn alvr_report_frame_decoded(target_timestamp_ns: u64) {
     if let Some(context) = &*CLIENT_CORE_CONTEXT.lock() {
-        context.report_frame_decoded(Duration::from_nanos(target_timestamp_ns as u64));
+        context.report_frame_decoded(Duration::from_nanos(target_timestamp_ns));
     }
 }
 
@@ -643,7 +642,7 @@ pub unsafe extern "C" fn alvr_report_compositor_start(
 ) {
     if let Some(context) = &*CLIENT_CORE_CONTEXT.lock() {
         let view_params =
-            context.report_compositor_start(Duration::from_nanos(target_timestamp_ns as u64));
+            context.report_compositor_start(Duration::from_nanos(target_timestamp_ns));
 
         *out_view_params = AlvrViewParams {
             pose: to_capi_pose(view_params[0].pose),

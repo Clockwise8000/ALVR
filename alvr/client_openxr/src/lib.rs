@@ -244,6 +244,10 @@ pub fn entry_point() {
             encoder_high_profile: platform != Platform::Unknown,
             encoder_10_bits: platform != Platform::Unknown,
             encoder_av1: matches!(platform, Platform::Quest3 | Platform::Quest3S),
+            prefer_10bit: false,
+            prefer_full_range: true,
+            preferred_encoding_gamma: 1.0,
+            prefer_hdr: false,
         };
         let core_context = Arc::new(ClientCoreContext::new(capabilities));
 
@@ -443,13 +447,15 @@ pub fn entry_point() {
                 let time = to_xr_time(display_time);
                 error!("End frame failed! {e}, timestamp: {display_time:?}, time: {time:?}");
 
-                xr_frame_stream
-                    .end(
-                        frame_state.predicted_display_time,
-                        xr::EnvironmentBlendMode::OPAQUE,
-                        &[],
-                    )
-                    .unwrap();
+                if !platform.is_vive() {
+                    xr_frame_stream
+                        .end(
+                            frame_state.predicted_display_time,
+                            xr::EnvironmentBlendMode::OPAQUE,
+                            &[],
+                        )
+                        .unwrap();
+                }
             }
         }
     }
@@ -458,10 +464,11 @@ pub fn entry_point() {
 }
 
 #[allow(unused)]
-fn xr_runtime_now(xr_instance: &xr::Instance) -> Option<Duration> {
-    let time_nanos = xr_instance.now().ok()?.as_nanos();
-
-    (time_nanos > 0).then(|| Duration::from_nanos(time_nanos as _))
+fn xr_runtime_now(xr_instance: &xr::Instance) -> Option<xr::Time> {
+    xr_instance
+        .now()
+        .ok()
+        .filter(|&time_nanos| time_nanos.as_nanos() > 0)
 }
 
 #[cfg(target_os = "android")]
